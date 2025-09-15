@@ -5,6 +5,10 @@
 (define-constant ERR_DAILY_LIMIT_EXCEEDED (err u103))
 (define-constant ERR_ALREADY_REGISTERED (err u104))
 (define-constant ERR_INVALID_DATE (err u105))
+(define-constant ERR_GOAL_NOT_FOUND (err u106))
+(define-constant ERR_GOAL_ALREADY_EXISTS (err u107))
+(define-constant ERR_INVALID_GOAL_DURATION (err u108))
+(define-constant ERR_GOAL_EXPIRED (err u109))
 
 (define-data-var total-users uint u0)
 (define-data-var total-water-used uint u0)
@@ -60,6 +64,31 @@
     }
 )
 
+(define-map user-goals
+    principal
+    {
+        target-reduction-percentage: uint,
+        start-date: uint,
+        end-date: uint,
+        baseline-usage: uint,
+        current-progress: uint,
+        is-achieved: bool,
+        goal-type: (string-ascii 20),
+    }
+)
+
+(define-map goal-achievements
+    {
+        user: principal,
+        goal-id: uint,
+    }
+    {
+        achieved-at: uint,
+        actual-reduction: uint,
+        bonus-points: uint,
+    }
+)
+
 (define-read-only (get-user-info (user principal))
     (map-get? users user)
 )
@@ -88,6 +117,20 @@
 
 (define-read-only (get-conservation-rewards (user principal))
     (map-get? conservation-rewards user)
+)
+
+(define-read-only (get-user-goal (user principal))
+    (map-get? user-goals user)
+)
+
+(define-read-only (get-goal-achievement
+        (user principal)
+        (goal-id uint)
+    )
+    (map-get? goal-achievements {
+        user: user,
+        goal-id: goal-id,
+    })
 )
 
 (define-read-only (get-total-users)
@@ -381,6 +424,22 @@
     )
 )
 
+(define-read-only (calculate-goal-progress (user principal))
+    (let (
+            (goal (unwrap! (map-get? user-goals user) u0))
+            (user-info (unwrap! (map-get? users user) u0))
+            (baseline-usage (get baseline-usage goal))
+            (current-total (get total-usage user-info))
+            (days-since-goal (- (get-current-date) (get start-date goal)))
+            (projected-baseline (* baseline-usage days-since-goal))
+        )
+        (if (> projected-baseline u0)
+            (/ (* (- projected-baseline current-total) u100) projected-baseline)
+            u0
+        )
+    )
+)
+
 (define-public (bulk-update-users (users-list (list 50 principal)))
     (begin
         (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
@@ -405,5 +464,107 @@
             )
             prev-response
         )
+    )
+)
+
+(define-public (set-conservation-goal
+        (target-reduction-percentage uint)
+        (duration-days uint)
+        (goal-type (string-ascii 20))
+    )
+    (let (
+            (user tx-sender)
+            (current-date (get-current-date))
+            (end-date (+ current-date duration-days))
+            (user-info (unwrap! (map-get? users user) ERR_USER_NOT_FOUND))
+            (days-registered (- current-date (get registered-at user-info)))
+            (daily-avg (if (> days-registered u0)
+                (/ (get total-usage user-info) days-registered)
+                u0
+            ))
+        )
+        (asserts!
+            (and (> target-reduction-percentage u0) (<= target-reduction-percentage u100))
+            ERR_INVALID_AMOUNT
+        )
+        (asserts! (and (> duration-days u0) (<= duration-days u365))
+            ERR_INVALID_GOAL_DURATION
+        )
+        (asserts! (is-none (map-get? user-goals user)) ERR_GOAL_ALREADY_EXISTS)
+
+        (map-set user-goals user {
+            target-reduction-percentage: target-reduction-percentage,
+            start-date: current-date,
+            end-date: end-date,
+            baseline-usage: daily-avg,
+            current-progress: u0,
+            is-achieved: false,
+            goal-type: goal-type,
+        })
+        (ok true)
+    )
+)
+
+(define-public (update-goal-progress)
+    (let (
+            (user tx-sender)
+            (goal (unwrap! (map-get? user-goals user) ERR_GOAL_NOT_FOUND))
+            (current-date (get-current-date))
+            (progress (calculate-goal-progress user))
+            (target-percentage (get target-reduction-percentage goal))
+        )
+        (asserts! (<= current-date (get end-date goal)) ERR_GOAL_EXPIRED)
+
+        (map-set user-goals user (merge goal { current-progress: progress }))
+
+        (if (>= progress target-percentage)
+            (begin
+                (map-set user-goals user (merge goal { is-achieved: true }))
+                (unwrap-panic (award-goal-achievement user progress))
+                (ok true)
+            )
+            (ok false)
+        )
+    )
+)
+
+(define-private (award-goal-achievement
+        (user principal)
+        (actual-reduction uint)
+    )
+    (let (
+            (goal (unwrap! (map-get? user-goals user) ERR_GOAL_NOT_FOUND))
+            (bonus-multiplier (if (> actual-reduction (get target-reduction-percentage goal))
+                u2
+                u1
+            ))
+            (bonus-points (* actual-reduction bonus-multiplier))
+            (user-info (unwrap! (map-get? users user) ERR_USER_NOT_FOUND))
+            (reward-info (unwrap! (map-get? conservation-rewards user) ERR_USER_NOT_FOUND))
+        )
+        (map-set goal-achievements {
+            user: user,
+            goal-id: (get-current-date),
+        } {
+            achieved-at: (get-current-date),
+            actual-reduction: actual-reduction,
+            bonus-points: bonus-points,
+        })
+
+        (map-set conservation-rewards user {
+            total-rewards: (+ (get total-rewards reward-info) bonus-points),
+            last-reward-block: stacks-block-height,
+        })
+        (ok true)
+    )
+)
+
+(define-public (reset-goal)
+    (let (
+            (user tx-sender)
+            (goal (unwrap! (map-get? user-goals user) ERR_GOAL_NOT_FOUND))
+        )
+        (map-delete user-goals user)
+        (ok true)
     )
 )
