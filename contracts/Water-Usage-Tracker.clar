@@ -9,6 +9,9 @@
 (define-constant ERR_GOAL_ALREADY_EXISTS (err u107))
 (define-constant ERR_INVALID_GOAL_DURATION (err u108))
 (define-constant ERR_GOAL_EXPIRED (err u109))
+(define-constant ERR_ALERT_NOT_FOUND (err u110))
+(define-constant ERR_INVALID_THRESHOLD (err u111))
+(define-constant ERR_ALERT_ALREADY_EXISTS (err u112))
 
 (define-data-var total-users uint u0)
 (define-data-var total-water-used uint u0)
@@ -89,6 +92,31 @@
     }
 )
 
+(define-map user-alert-settings
+    principal
+    {
+        warning-threshold-percentage: uint,
+        critical-threshold-percentage: uint,
+        anomaly-detection-enabled: bool,
+        alert-frequency-hours: uint,
+        last-alert-timestamp: uint,
+    }
+)
+
+(define-map alert-history
+    {
+        user: principal,
+        alert-id: uint,
+    }
+    {
+        alert-type: (string-ascii 20),
+        triggered-at: uint,
+        usage-amount: uint,
+        threshold-breached: uint,
+        is-acknowledged: bool,
+    }
+)
+
 (define-read-only (get-user-info (user principal))
     (map-get? users user)
 )
@@ -130,6 +158,20 @@
     (map-get? goal-achievements {
         user: user,
         goal-id: goal-id,
+    })
+)
+
+(define-read-only (get-user-alert-settings (user principal))
+    (map-get? user-alert-settings user)
+)
+
+(define-read-only (get-alert-history
+        (user principal)
+        (alert-id uint)
+    )
+    (map-get? alert-history {
+        user: user,
+        alert-id: alert-id,
     })
 )
 
@@ -243,6 +285,7 @@
         (var-set total-water-used (+ (var-get total-water-used) amount))
         (unwrap-panic (update-monthly-stats user amount current-date))
         (unwrap-panic (check-conservation-reward user))
+        (unwrap-panic (check-usage-alerts user new-daily-total daily-limit))
         (ok true)
     )
 )
@@ -565,6 +608,252 @@
             (goal (unwrap! (map-get? user-goals user) ERR_GOAL_NOT_FOUND))
         )
         (map-delete user-goals user)
+        (ok true)
+    )
+)
+
+(define-public (configure-alerts
+        (warning-threshold-percentage uint)
+        (critical-threshold-percentage uint)
+        (anomaly-detection-enabled bool)
+        (alert-frequency-hours uint)
+    )
+    (let ((user tx-sender))
+        (asserts!
+            (and (> warning-threshold-percentage u0) (<= warning-threshold-percentage u100))
+            ERR_INVALID_THRESHOLD
+        )
+        (asserts!
+            (and (> critical-threshold-percentage u0) (<= critical-threshold-percentage u100))
+            ERR_INVALID_THRESHOLD
+        )
+        (asserts! (>= critical-threshold-percentage warning-threshold-percentage)
+            ERR_INVALID_THRESHOLD
+        )
+        (asserts!
+            (and (> alert-frequency-hours u0) (<= alert-frequency-hours u24))
+            ERR_INVALID_THRESHOLD
+        )
+
+        (map-set user-alert-settings user {
+            warning-threshold-percentage: warning-threshold-percentage,
+            critical-threshold-percentage: critical-threshold-percentage,
+            anomaly-detection-enabled: anomaly-detection-enabled,
+            alert-frequency-hours: alert-frequency-hours,
+            last-alert-timestamp: u0,
+        })
+        (ok true)
+    )
+)
+
+(define-private (check-usage-alerts
+        (user principal)
+        (current-usage uint)
+        (daily-limit uint)
+    )
+    (let (
+            (alert-settings (map-get? user-alert-settings user))
+            (usage-percentage (/ (* current-usage u100) daily-limit))
+        )
+        (if (is-some alert-settings)
+            (let (
+                    (settings (unwrap-panic alert-settings))
+                    (warning-threshold (get warning-threshold-percentage settings))
+                    (critical-threshold (get critical-threshold-percentage settings))
+                    (last-alert-time (get last-alert-timestamp settings))
+                    (alert-frequency (get alert-frequency-hours settings))
+                    (current-time (/
+                        (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1)))
+                        u3600
+                    ))
+                    (time-since-last-alert (- current-time last-alert-time))
+                )
+                (if (and
+                        (>= usage-percentage critical-threshold)
+                        (>= time-since-last-alert alert-frequency)
+                    )
+                    (begin
+                        (unwrap-panic (trigger-alert user "critical" current-usage
+                            critical-threshold
+                        ))
+                        (ok true)
+                    )
+                    (if (and
+                            (>= usage-percentage warning-threshold)
+                            (>= time-since-last-alert alert-frequency)
+                        )
+                        (begin
+                            (unwrap-panic (trigger-alert user "warning" current-usage
+                                warning-threshold
+                            ))
+                            (ok true)
+                        )
+                        (ok false)
+                    )
+                )
+            )
+            (ok false)
+        )
+    )
+)
+
+(define-private (trigger-alert
+        (user principal)
+        (alert-type (string-ascii 20))
+        (usage-amount uint)
+        (threshold-breached uint)
+    )
+    (let (
+            (current-time (/
+                (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1)))
+                u3600
+            ))
+            (alert-id (+ current-time (mod usage-amount u1000)))
+            (settings (unwrap! (map-get? user-alert-settings user) ERR_ALERT_NOT_FOUND))
+        )
+        (map-set alert-history {
+            user: user,
+            alert-id: alert-id,
+        } {
+            alert-type: alert-type,
+            triggered-at: current-time,
+            usage-amount: usage-amount,
+            threshold-breached: threshold-breached,
+            is-acknowledged: false,
+        })
+
+        (map-set user-alert-settings user
+            (merge settings { last-alert-timestamp: current-time })
+        )
+        (ok true)
+    )
+)
+
+(define-public (acknowledge-alert (alert-id uint))
+    (let (
+            (user tx-sender)
+            (alert (unwrap!
+                (map-get? alert-history {
+                    user: user,
+                    alert-id: alert-id,
+                })
+                ERR_ALERT_NOT_FOUND
+            ))
+        )
+        (map-set alert-history {
+            user: user,
+            alert-id: alert-id,
+        }
+            (merge alert { is-acknowledged: true })
+        )
+        (ok true)
+    )
+)
+
+(define-read-only (get-user-active-alerts (user principal))
+    (let (
+            (current-time (/
+                (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1)))
+                u3600
+            ))
+            (time-window u72)
+        )
+        (fold check-recent-alerts (list u1 u2 u3 u4 u5 u6 u7 u8 u9 u10) (list))
+    )
+)
+
+(define-private (check-recent-alerts
+        (index uint)
+        (acc (list 10
+            {
+            alert-id: uint,
+            alert-type: (string-ascii 20),
+            triggered-at: uint,
+            is-acknowledged: bool,
+        }))
+    )
+    (let (
+            (current-time (/
+                (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1)))
+                u3600
+            ))
+            (alert-key {
+                user: tx-sender,
+                alert-id: (+ current-time index),
+            })
+            (alert (map-get? alert-history alert-key))
+        )
+        (if (is-some alert)
+            (let (
+                    (alert-data (unwrap-panic alert))
+                    (triggered-time (get triggered-at alert-data))
+                )
+                (if (and
+                        (>= (- current-time triggered-time) u0)
+                        (<= (- current-time triggered-time) u72)
+                    )
+                    (unwrap-panic (as-max-len?
+                        (append acc {
+                            alert-id: (+ current-time index),
+                            alert-type: (get alert-type alert-data),
+                            triggered-at: triggered-time,
+                            is-acknowledged: (get is-acknowledged alert-data),
+                        })
+                        u10
+                    ))
+                    acc
+                )
+            )
+            acc
+        )
+    )
+)
+
+(define-read-only (calculate-usage-trend (user principal))
+    (let (
+            (user-info (unwrap! (map-get? users user) u0))
+            (current-date (get-current-date))
+            (yesterday (- current-date u1))
+            (two-days-ago (- current-date u2))
+            (today-usage (get amount
+                (default-to {
+                    amount: u0,
+                    timestamp: u0,
+                }
+                    (map-get? daily-usage {
+                        user: user,
+                        date: current-date,
+                    })
+                )))
+            (yesterday-usage (get amount
+                (default-to {
+                    amount: u0,
+                    timestamp: u0,
+                }
+                    (map-get? daily-usage {
+                        user: user,
+                        date: yesterday,
+                    })
+                )))
+            (two-days-usage (get amount
+                (default-to {
+                    amount: u0,
+                    timestamp: u0,
+                }
+                    (map-get? daily-usage {
+                        user: user,
+                        date: two-days-ago,
+                    })
+                )))
+            (three-day-average (/ (+ today-usage yesterday-usage two-days-usage) u3))
+        )
+        three-day-average
+    )
+)
+
+(define-public (disable-alerts)
+    (let ((user tx-sender))
+        (map-delete user-alert-settings user)
         (ok true)
     )
 )
