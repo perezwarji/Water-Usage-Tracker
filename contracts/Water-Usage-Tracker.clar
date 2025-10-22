@@ -12,6 +12,9 @@
 (define-constant ERR_ALERT_NOT_FOUND (err u110))
 (define-constant ERR_INVALID_THRESHOLD (err u111))
 (define-constant ERR_ALERT_ALREADY_EXISTS (err u112))
+(define-constant ERR_PATTERN_NOT_FOUND (err u113))
+(define-constant ERR_INSUFFICIENT_DATA (err u114))
+(define-constant ERR_INVALID_PATTERN_TYPE (err u115))
 
 (define-data-var total-users uint u0)
 (define-data-var total-water-used uint u0)
@@ -114,6 +117,44 @@
         usage-amount: uint,
         threshold-breached: uint,
         is-acknowledged: bool,
+    }
+)
+
+(define-map usage-patterns
+    principal
+    {
+        weekday-average: uint,
+        weekend-average: uint,
+        peak-usage-hour: uint,
+        efficiency-score: uint,
+        seasonal-variation: uint,
+        pattern-confidence: uint,
+        last-analysis-date: uint,
+        data-points-count: uint,
+    }
+)
+
+(define-map hourly-usage-tracking
+    {
+        user: principal,
+        date: uint,
+        hour: uint,
+    }
+    {
+        amount: uint,
+        timestamp: uint,
+    }
+)
+
+(define-map personalized-recommendations
+    principal
+    {
+        recommendation-type: (string-ascii 30),
+        priority-level: uint,
+        potential-savings: uint,
+        implementation-difficulty: uint,
+        generated-at: uint,
+        is-active: bool,
     }
 )
 
@@ -750,6 +791,26 @@
     )
 )
 
+(define-read-only (get-usage-patterns (user principal))
+    (map-get? usage-patterns user)
+)
+
+(define-read-only (get-hourly-usage
+        (user principal)
+        (date uint)
+        (hour uint)
+    )
+    (map-get? hourly-usage-tracking {
+        user: user,
+        date: date,
+        hour: hour,
+    })
+)
+
+(define-read-only (get-personalized-recommendations (user principal))
+    (map-get? personalized-recommendations user)
+)
+
 (define-read-only (get-user-active-alerts (user principal))
     (let (
             (current-time (/
@@ -764,13 +825,15 @@
 
 (define-private (check-recent-alerts
         (index uint)
-        (acc (list 10
+        (acc (list
+            10
             {
-            alert-id: uint,
-            alert-type: (string-ascii 20),
-            triggered-at: uint,
-            is-acknowledged: bool,
-        }))
+                alert-id: uint,
+                alert-type: (string-ascii 20),
+                triggered-at: uint,
+                is-acknowledged: bool,
+            }
+        ))
     )
     (let (
             (current-time (/
@@ -855,5 +918,359 @@
     (let ((user tx-sender))
         (map-delete user-alert-settings user)
         (ok true)
+    )
+)
+
+(define-public (record-hourly-usage
+        (amount uint)
+        (hour uint)
+    )
+    (let (
+            (user tx-sender)
+            (current-date (get-current-date))
+            (user-info (unwrap! (map-get? users user) ERR_USER_NOT_FOUND))
+        )
+        (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+        (asserts! (and (>= hour u0) (<= hour u23)) ERR_INVALID_AMOUNT)
+
+        (map-set hourly-usage-tracking {
+            user: user,
+            date: current-date,
+            hour: hour,
+        } {
+            amount: amount,
+            timestamp: stacks-block-height,
+        })
+
+        (unwrap-panic (update-usage-patterns user))
+        (ok true)
+    )
+)
+
+(define-private (update-usage-patterns (user principal))
+    (let (
+            (user-info (unwrap! (map-get? users user) ERR_USER_NOT_FOUND))
+            (current-date (get-current-date))
+            (existing-pattern (default-to {
+                weekday-average: u0,
+                weekend-average: u0,
+                peak-usage-hour: u12,
+                efficiency-score: u50,
+                seasonal-variation: u0,
+                pattern-confidence: u0,
+                last-analysis-date: u0,
+                data-points-count: u0,
+            }
+                (map-get? usage-patterns user)
+            ))
+            (weekday-avg (calculate-weekday-average user))
+            (weekend-avg (calculate-weekend-average user))
+            (peak-hour (find-peak-usage-hour user))
+            (efficiency (calculate-efficiency-score user))
+            (data-points (+ (get data-points-count existing-pattern) u1))
+            (confidence (if (< (/ data-points u2) u100)
+                (/ data-points u2)
+                u100
+            ))
+        )
+        (map-set usage-patterns user {
+            weekday-average: weekday-avg,
+            weekend-average: weekend-avg,
+            peak-usage-hour: peak-hour,
+            efficiency-score: efficiency,
+            seasonal-variation: (calculate-seasonal-variation user),
+            pattern-confidence: confidence,
+            last-analysis-date: current-date,
+            data-points-count: data-points,
+        })
+        (ok true)
+    )
+)
+
+(define-private (calculate-weekday-average (user principal))
+    (let (
+            (current-date (get-current-date))
+            (weekday-sum (fold sum-weekday-usage (list u1 u2 u3 u4 u5) u0))
+        )
+        (/ weekday-sum u5)
+    )
+)
+
+(define-private (sum-weekday-usage
+        (day-offset uint)
+        (acc uint)
+    )
+    (let (
+            (current-date (get-current-date))
+            (check-date (- current-date day-offset))
+            (day-of-week (mod check-date u7))
+        )
+        (if (and (>= day-of-week u1) (<= day-of-week u5))
+            (+ acc (get-daily-usage-amount tx-sender check-date))
+            acc
+        )
+    )
+)
+
+(define-private (calculate-weekend-average (user principal))
+    (let (
+            (current-date (get-current-date))
+            (weekend-sum (fold sum-weekend-usage (list u1 u2 u3 u4 u5 u6 u7) u0))
+        )
+        (/ weekend-sum u2)
+    )
+)
+
+(define-private (sum-weekend-usage
+        (day-offset uint)
+        (acc uint)
+    )
+    (let (
+            (current-date (get-current-date))
+            (check-date (- current-date day-offset))
+            (day-of-week (mod check-date u7))
+        )
+        (if (or (is-eq day-of-week u0) (is-eq day-of-week u6))
+            (+ acc (get-daily-usage-amount tx-sender check-date))
+            acc
+        )
+    )
+)
+
+(define-private (get-daily-usage-amount
+        (user principal)
+        (date uint)
+    )
+    (let ((usage-data (map-get? daily-usage {
+            user: user,
+            date: date,
+        })))
+        (if (is-some usage-data)
+            (get amount (unwrap-panic usage-data))
+            u0
+        )
+    )
+)
+
+(define-private (find-peak-usage-hour (user principal))
+    (let (
+            (current-date (get-current-date))
+            (peak-data (fold find-max-hour
+                (list
+                    u0                     u1                     u2
+                                        u3                     u4                     u5
+                                        u6                     u7                     u8
+                                        u9                     u10                     u11
+                                        u12                     u13                     u14
+                                        u15                     u16
+                    u17                     u18                     u19                     u20
+                                        u21                     u22                     u23
+                ) {
+                max-amount: u0,
+                max-hour: u12,
+            }))
+        )
+        (get max-hour peak-data)
+    )
+)
+
+(define-private (find-max-hour
+        (hour uint)
+        (acc {
+            max-amount: uint,
+            max-hour: uint,
+        })
+    )
+    (let (
+            (current-date (get-current-date))
+            (hour-usage (get amount
+                (default-to {
+                    amount: u0,
+                    timestamp: u0,
+                }
+                    (map-get? hourly-usage-tracking {
+                        user: tx-sender,
+                        date: current-date,
+                        hour: hour,
+                    })
+                )))
+        )
+        (if (> hour-usage (get max-amount acc))
+            {
+                max-amount: hour-usage,
+                max-hour: hour,
+            }
+            acc
+        )
+    )
+)
+
+(define-private (calculate-efficiency-score (user principal))
+    (let (
+            (user-info (unwrap! (map-get? users user) u0))
+            (total-usage (get total-usage user-info))
+            (daily-limit (get daily-limit user-info))
+            (days-registered (- (get-current-date) (get registered-at user-info)))
+            (max-possible (* daily-limit days-registered))
+        )
+        (if (> max-possible u0)
+            (/ (* (- max-possible total-usage) u100) max-possible)
+            u50
+        )
+    )
+)
+
+(define-private (calculate-seasonal-variation (user principal))
+    (let (
+            (current-month (mod (/ (get-current-date) u30) u12))
+            (summer-months (list u5 u6 u7 u8))
+            (is-summer (is-some (index-of summer-months current-month)))
+        )
+        (if is-summer
+            u20
+            u10
+        )
+    )
+)
+
+(define-public (generate-recommendations)
+    (let (
+            (user tx-sender)
+            (pattern (unwrap! (map-get? usage-patterns user) ERR_PATTERN_NOT_FOUND))
+            (user-info (unwrap! (map-get? users user) ERR_USER_NOT_FOUND))
+            (efficiency-score (get efficiency-score pattern))
+            (weekday-avg (get weekday-average pattern))
+            (weekend-avg (get weekend-average pattern))
+            (peak-hour (get peak-usage-hour pattern))
+            (confidence (get pattern-confidence pattern))
+        )
+        (asserts! (>= confidence u30) ERR_INSUFFICIENT_DATA)
+
+        (let (
+                (recommendation-type (determine-recommendation-type efficiency-score weekday-avg
+                    weekend-avg peak-hour
+                ))
+                (priority (calculate-priority efficiency-score))
+                (savings (calculate-potential-savings weekday-avg weekend-avg))
+                (difficulty (calculate-implementation-difficulty recommendation-type))
+            )
+            (map-set personalized-recommendations user {
+                recommendation-type: recommendation-type,
+                priority-level: priority,
+                potential-savings: savings,
+                implementation-difficulty: difficulty,
+                generated-at: (get-current-date),
+                is-active: true,
+            })
+            (ok true)
+        )
+    )
+)
+
+(define-private (determine-recommendation-type
+        (efficiency uint)
+        (weekday-avg uint)
+        (weekend-avg uint)
+        (peak-hour uint)
+    )
+    (if (< efficiency u40)
+        "high-efficiency-upgrades"
+        (if (> weekend-avg (* weekday-avg u2))
+            "weekend-conservation"
+            (if (or (is-eq peak-hour u12) (is-eq peak-hour u18))
+                "peak-hour-shifting"
+                "general-optimization"
+            )
+        )
+    )
+)
+
+(define-private (calculate-priority (efficiency uint))
+    (if (< efficiency u30)
+        u3
+        (if (< efficiency u60)
+            u2
+            u1
+        )
+    )
+)
+
+(define-private (calculate-potential-savings
+        (weekday-avg uint)
+        (weekend-avg uint)
+    )
+    (let (
+            (total-weekly (* weekday-avg u5))
+            (weekend-weekly (* weekend-avg u2))
+            (total-avg (/ (+ total-weekly weekend-weekly) u7))
+        )
+        (/ total-avg u10)
+    )
+)
+
+(define-private (calculate-implementation-difficulty (rec-type (string-ascii 30)))
+    (if (is-eq rec-type "high-efficiency-upgrades")
+        u3
+        (if (is-eq rec-type "peak-hour-shifting")
+            u2
+            u1
+        )
+    )
+)
+
+(define-public (dismiss-recommendation)
+    (let (
+            (user tx-sender)
+            (recommendation (unwrap! (map-get? personalized-recommendations user)
+                ERR_PATTERN_NOT_FOUND
+            ))
+        )
+        (map-set personalized-recommendations user
+            (merge recommendation { is-active: false })
+        )
+        (ok true)
+    )
+)
+
+(define-read-only (get-pattern-insights (user principal))
+    (let (
+            (pattern (unwrap! (map-get? usage-patterns user) none))
+            (weekday-avg (get weekday-average pattern))
+            (weekend-avg (get weekend-average pattern))
+            (efficiency (get efficiency-score pattern))
+            (peak-hour (get peak-usage-hour pattern))
+            (confidence (get pattern-confidence pattern))
+        )
+        (some {
+            behavioral-type: (if (> weekend-avg weekday-avg)
+                "weekend-heavy"
+                "consistent"
+            ),
+            usage-efficiency: (if (> efficiency u70)
+                "excellent"
+                (if (> efficiency u40)
+                    "good"
+                    "needs-improvement"
+                )
+            ),
+            peak-period: (if (and (>= peak-hour u6) (<= peak-hour u10))
+                "morning"
+                (if (and (>= peak-hour u17) (<= peak-hour u21))
+                    "evening"
+                    "off-peak"
+                )
+            ),
+            data-reliability: (if (> confidence u70)
+                "high"
+                (if (> confidence u40)
+                    "medium"
+                    "low"
+                )
+            ),
+            conservation-potential: (if (< efficiency u50)
+                "high"
+                "moderate"
+            ),
+        })
     )
 )
