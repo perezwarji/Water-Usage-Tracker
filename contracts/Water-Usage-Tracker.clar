@@ -162,6 +162,68 @@
     (map-get? users user)
 )
 
+(define-read-only (get-user-dashboard (user principal))
+    (let (
+            (user-info-opt (map-get? users user))
+            (has-user (is-some user-info-opt))
+            (user-info (if has-user
+                (unwrap-panic user-info-opt)
+                {
+                    registered-at: u0,
+                    daily-limit: u0,
+                    total-usage: u0,
+                    conservation-score: u0,
+                    is-active: false,
+                }
+            ))
+            (current-date (get-current-date))
+            (today-usage-opt (map-get? daily-usage {
+                user: user,
+                date: current-date,
+            }))
+            (today-usage (if (is-some today-usage-opt)
+                (get amount (unwrap-panic today-usage-opt))
+                u0
+            ))
+            (goal-opt (map-get? user-goals user))
+            (has-goal (is-some goal-opt))
+            (goal-progress (if has-goal
+                (calculate-goal-progress user)
+                u0
+            ))
+            (recommendation-opt (map-get? personalized-recommendations user))
+            (has-recommendation (is-some recommendation-opt))
+            (recommendation (if has-recommendation
+                (unwrap-panic recommendation-opt)
+                {
+                    recommendation-type: "",
+                    priority-level: u0,
+                    potential-savings: u0,
+                    implementation-difficulty: u0,
+                    generated-at: u0,
+                    is-active: false,
+                }
+            ))
+        )
+        (if has-user
+            (some {
+                user: user,
+                registered-at: (get registered-at user-info),
+                daily-limit: (get daily-limit user-info),
+                total-usage: (get total-usage user-info),
+                conservation-score: (get conservation-score user-info),
+                is-active: (get is-active user-info),
+                today-usage: today-usage,
+                has-goal: has-goal,
+                goal-progress: goal-progress,
+                has-active-recommendation: (and has-recommendation (get is-active recommendation)),
+                recommendation-type: (get recommendation-type recommendation),
+            })
+            none
+        )
+    )
+)
+
 (define-read-only (get-daily-usage
         (user principal)
         (date uint)
@@ -1064,7 +1126,7 @@
                     u12                     u13                     u14
                     u15                     u16
                     u17                     u18                     u19
-                                        u20
+                    u20
                     u21                     u22                     u23
                 ) {
                 max-amount: u0,
