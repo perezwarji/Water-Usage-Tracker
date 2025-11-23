@@ -1,0 +1,1339 @@
+(define-constant CONTRACT_OWNER tx-sender)
+(define-constant ERR_NOT_AUTHORIZED (err u100))
+(define-constant ERR_USER_NOT_FOUND (err u101))
+(define-constant ERR_INVALID_AMOUNT (err u102))
+(define-constant ERR_DAILY_LIMIT_EXCEEDED (err u103))
+(define-constant ERR_ALREADY_REGISTERED (err u104))
+(define-constant ERR_INVALID_DATE (err u105))
+(define-constant ERR_GOAL_NOT_FOUND (err u106))
+(define-constant ERR_GOAL_ALREADY_EXISTS (err u107))
+(define-constant ERR_INVALID_GOAL_DURATION (err u108))
+(define-constant ERR_GOAL_EXPIRED (err u109))
+(define-constant ERR_ALERT_NOT_FOUND (err u110))
+(define-constant ERR_INVALID_THRESHOLD (err u111))
+(define-constant ERR_ALERT_ALREADY_EXISTS (err u112))
+(define-constant ERR_PATTERN_NOT_FOUND (err u113))
+(define-constant ERR_INSUFFICIENT_DATA (err u114))
+(define-constant ERR_INVALID_PATTERN_TYPE (err u115))
+
+(define-data-var total-users uint u0)
+(define-data-var total-water-used uint u0)
+
+(define-map users
+    principal
+    {
+        registered-at: uint,
+        daily-limit: uint,
+        total-usage: uint,
+        conservation-score: uint,
+        is-active: bool,
+    }
+)
+
+(define-map daily-usage
+    {
+        user: principal,
+        date: uint,
+    }
+    {
+        amount: uint,
+        timestamp: uint,
+    }
+)
+
+(define-map monthly-stats
+    {
+        user: principal,
+        month: uint,
+        year: uint,
+    }
+    {
+        total-amount: uint,
+        days-recorded: uint,
+        average-daily: uint,
+    }
+)
+
+(define-map conservation-rewards
+    principal
+    {
+        total-rewards: uint,
+        last-reward-block: uint,
+    }
+)
+
+(define-map leaderboard
+    uint
+    {
+        user: principal,
+        conservation-score: uint,
+    }
+)
+
+(define-map user-goals
+    principal
+    {
+        target-reduction-percentage: uint,
+        start-date: uint,
+        end-date: uint,
+        baseline-usage: uint,
+        current-progress: uint,
+        is-achieved: bool,
+        goal-type: (string-ascii 20),
+    }
+)
+
+(define-map goal-achievements
+    {
+        user: principal,
+        goal-id: uint,
+    }
+    {
+        achieved-at: uint,
+        actual-reduction: uint,
+        bonus-points: uint,
+    }
+)
+
+(define-map user-alert-settings
+    principal
+    {
+        warning-threshold-percentage: uint,
+        critical-threshold-percentage: uint,
+        anomaly-detection-enabled: bool,
+        alert-frequency-hours: uint,
+        last-alert-timestamp: uint,
+    }
+)
+
+(define-map alert-history
+    {
+        user: principal,
+        alert-id: uint,
+    }
+    {
+        alert-type: (string-ascii 20),
+        triggered-at: uint,
+        usage-amount: uint,
+        threshold-breached: uint,
+        is-acknowledged: bool,
+    }
+)
+
+(define-map usage-patterns
+    principal
+    {
+        weekday-average: uint,
+        weekend-average: uint,
+        peak-usage-hour: uint,
+        efficiency-score: uint,
+        seasonal-variation: uint,
+        pattern-confidence: uint,
+        last-analysis-date: uint,
+        data-points-count: uint,
+    }
+)
+
+(define-map hourly-usage-tracking
+    {
+        user: principal,
+        date: uint,
+        hour: uint,
+    }
+    {
+        amount: uint,
+        timestamp: uint,
+    }
+)
+
+(define-map personalized-recommendations
+    principal
+    {
+        recommendation-type: (string-ascii 30),
+        priority-level: uint,
+        potential-savings: uint,
+        implementation-difficulty: uint,
+        generated-at: uint,
+        is-active: bool,
+    }
+)
+
+(define-read-only (get-user-info (user principal))
+    (map-get? users user)
+)
+
+(define-read-only (get-user-dashboard (user principal))
+    (let (
+            (user-info-opt (map-get? users user))
+            (has-user (is-some user-info-opt))
+            (user-info (if has-user
+                (unwrap-panic user-info-opt)
+                {
+                    registered-at: u0,
+                    daily-limit: u0,
+                    total-usage: u0,
+                    conservation-score: u0,
+                    is-active: false,
+                }
+            ))
+            (current-date (get-current-date))
+            (today-usage-opt (map-get? daily-usage {
+                user: user,
+                date: current-date,
+            }))
+            (today-usage (if (is-some today-usage-opt)
+                (get amount (unwrap-panic today-usage-opt))
+                u0
+            ))
+            (goal-opt (map-get? user-goals user))
+            (has-goal (is-some goal-opt))
+            (goal-progress (if has-goal
+                (calculate-goal-progress user)
+                u0
+            ))
+            (recommendation-opt (map-get? personalized-recommendations user))
+            (has-recommendation (is-some recommendation-opt))
+            (recommendation (if has-recommendation
+                (unwrap-panic recommendation-opt)
+                {
+                    recommendation-type: "",
+                    priority-level: u0,
+                    potential-savings: u0,
+                    implementation-difficulty: u0,
+                    generated-at: u0,
+                    is-active: false,
+                }
+            ))
+        )
+        (if has-user
+            (some {
+                user: user,
+                registered-at: (get registered-at user-info),
+                daily-limit: (get daily-limit user-info),
+                total-usage: (get total-usage user-info),
+                conservation-score: (get conservation-score user-info),
+                is-active: (get is-active user-info),
+                today-usage: today-usage,
+                has-goal: has-goal,
+                goal-progress: goal-progress,
+                has-active-recommendation: (and has-recommendation (get is-active recommendation)),
+                recommendation-type: (get recommendation-type recommendation),
+            })
+            none
+        )
+    )
+)
+
+(define-read-only (get-daily-usage
+        (user principal)
+        (date uint)
+    )
+    (map-get? daily-usage {
+        user: user,
+        date: date,
+    })
+)
+
+(define-read-only (get-monthly-stats
+        (user principal)
+        (month uint)
+        (year uint)
+    )
+    (map-get? monthly-stats {
+        user: user,
+        month: month,
+        year: year,
+    })
+)
+
+(define-read-only (get-conservation-rewards (user principal))
+    (map-get? conservation-rewards user)
+)
+
+(define-read-only (get-user-goal (user principal))
+    (map-get? user-goals user)
+)
+
+(define-read-only (get-goal-achievement
+        (user principal)
+        (goal-id uint)
+    )
+    (map-get? goal-achievements {
+        user: user,
+        goal-id: goal-id,
+    })
+)
+
+(define-read-only (get-user-alert-settings (user principal))
+    (map-get? user-alert-settings user)
+)
+
+(define-read-only (get-alert-history
+        (user principal)
+        (alert-id uint)
+    )
+    (map-get? alert-history {
+        user: user,
+        alert-id: alert-id,
+    })
+)
+
+(define-read-only (get-total-users)
+    (var-get total-users)
+)
+
+(define-read-only (get-total-water-used)
+    (var-get total-water-used)
+)
+
+(define-read-only (get-current-date)
+    (/ (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1)))
+        u86400
+    )
+)
+
+(define-read-only (is-user-registered (user principal))
+    (is-some (map-get? users user))
+)
+
+(define-read-only (calculate-conservation-score (user principal))
+    (let (
+            (user-info (unwrap! (map-get? users user) u0))
+            (total-usage (get total-usage user-info))
+            (daily-limit (get daily-limit user-info))
+            (days-registered (- (get-current-date) (get registered-at user-info)))
+            (max-possible-usage (* daily-limit days-registered))
+        )
+        (if (> max-possible-usage u0)
+            (* (- max-possible-usage total-usage) u100)
+            u0
+        )
+    )
+)
+
+(define-public (register-user (daily-limit uint))
+    (let (
+            (user tx-sender)
+            (current-date (get-current-date))
+        )
+        (asserts! (> daily-limit u0) ERR_INVALID_AMOUNT)
+        (asserts! (is-none (map-get? users user)) ERR_ALREADY_REGISTERED)
+
+        (map-set users user {
+            registered-at: current-date,
+            daily-limit: daily-limit,
+            total-usage: u0,
+            conservation-score: u0,
+            is-active: true,
+        })
+
+        (map-set conservation-rewards user {
+            total-rewards: u0,
+            last-reward-block: stacks-block-height,
+        })
+
+        (var-set total-users (+ (var-get total-users) u1))
+        (ok true)
+    )
+)
+
+(define-public (update-daily-limit (new-limit uint))
+    (let (
+            (user tx-sender)
+            (user-info (unwrap! (map-get? users user) ERR_USER_NOT_FOUND))
+        )
+        (asserts! (> new-limit u0) ERR_INVALID_AMOUNT)
+
+        (map-set users user (merge user-info { daily-limit: new-limit }))
+        (ok true)
+    )
+)
+
+(define-public (record-usage (amount uint))
+    (let (
+            (user tx-sender)
+            (current-date (get-current-date))
+            (user-info (unwrap! (map-get? users user) ERR_USER_NOT_FOUND))
+            (daily-limit (get daily-limit user-info))
+            (existing-daily-usage (default-to {
+                amount: u0,
+                timestamp: u0,
+            }
+                (map-get? daily-usage {
+                    user: user,
+                    date: current-date,
+                })
+            ))
+            (current-daily-total (get amount existing-daily-usage))
+            (new-daily-total (+ current-daily-total amount))
+        )
+        (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+        (asserts! (<= new-daily-total daily-limit) ERR_DAILY_LIMIT_EXCEEDED)
+
+        (map-set daily-usage {
+            user: user,
+            date: current-date,
+        } {
+            amount: new-daily-total,
+            timestamp: stacks-block-height,
+        })
+
+        (map-set users user
+            (merge user-info {
+                total-usage: (+ (get total-usage user-info) amount),
+                conservation-score: (calculate-conservation-score user),
+            })
+        )
+
+        (var-set total-water-used (+ (var-get total-water-used) amount))
+        (unwrap-panic (update-monthly-stats user amount current-date))
+        (unwrap-panic (check-conservation-reward user))
+        (unwrap-panic (check-usage-alerts user new-daily-total daily-limit))
+        (ok true)
+    )
+)
+
+(define-private (update-monthly-stats
+        (user principal)
+        (amount uint)
+        (date uint)
+    )
+    (let (
+            (month (mod (/ date u30) u12))
+            (year (+ u2023 (/ date u365)))
+            (existing-stats (default-to {
+                total-amount: u0,
+                days-recorded: u0,
+                average-daily: u0,
+            }
+                (map-get? monthly-stats {
+                    user: user,
+                    month: month,
+                    year: year,
+                })
+            ))
+            (new-total (+ (get total-amount existing-stats) amount))
+            (new-days (+ (get days-recorded existing-stats) u1))
+            (new-average (/ new-total new-days))
+        )
+        (map-set monthly-stats {
+            user: user,
+            month: month,
+            year: year,
+        } {
+            total-amount: new-total,
+            days-recorded: new-days,
+            average-daily: new-average,
+        })
+        (ok true)
+    )
+)
+
+(define-private (check-conservation-reward (user principal))
+    (let (
+            (user-info (unwrap! (map-get? users user) ERR_USER_NOT_FOUND))
+            (conservation-score (get conservation-score user-info))
+            (reward-info (unwrap! (map-get? conservation-rewards user) ERR_USER_NOT_FOUND))
+            (last-reward-block (get last-reward-block reward-info))
+            (blocks-since-reward (- stacks-block-height last-reward-block))
+        )
+        (if (and (> conservation-score u5000) (> blocks-since-reward u144))
+            (begin
+                (map-set conservation-rewards user {
+                    total-rewards: (+ (get total-rewards reward-info) u10),
+                    last-reward-block: stacks-block-height,
+                })
+                (ok true)
+            )
+            (ok false)
+        )
+    )
+)
+
+(define-public (deactivate-account)
+    (let (
+            (user tx-sender)
+            (user-info (unwrap! (map-get? users user) ERR_USER_NOT_FOUND))
+        )
+        (map-set users user (merge user-info { is-active: false }))
+        (ok true)
+    )
+)
+
+(define-public (reactivate-account)
+    (let (
+            (user tx-sender)
+            (user-info (unwrap! (map-get? users user) ERR_USER_NOT_FOUND))
+        )
+        (map-set users user (merge user-info { is-active: true }))
+        (ok true)
+    )
+)
+
+(define-read-only (get-user-usage-history
+        (user principal)
+        (start-date uint)
+        (end-date uint)
+    )
+    (if (and (<= start-date end-date) (<= (- end-date start-date) u30))
+        (fold check-date-usage (list start-date) (list))
+        (list)
+    )
+)
+
+(define-private (check-date-usage
+        (date uint)
+        (acc (list 30 {
+            date: uint,
+            amount: uint,
+        }))
+    )
+    (let (
+            (usage (map-get? daily-usage {
+                user: tx-sender,
+                date: date,
+            }))
+            (amount (if (is-some usage)
+                (get amount (unwrap-panic usage))
+                u0
+            ))
+        )
+        (unwrap-panic (as-max-len?
+            (append acc {
+                date: date,
+                amount: amount,
+            })
+            u30
+        ))
+    )
+)
+
+(define-read-only (get-top-conservers (limit uint))
+    (let ((max-limit (if (<= limit u10)
+            limit
+            u10
+        )))
+        (fold build-leaderboard (list u1 u2 u3 u4 u5 u6 u7 u8 u9 u10) (list))
+    )
+)
+
+(define-private (build-leaderboard
+        (index uint)
+        (acc (list 10 {
+            user: principal,
+            score: uint,
+        }))
+    )
+    (let ((entry (map-get? leaderboard index)))
+        (if (is-some entry)
+            (let ((leaderboard-entry (unwrap-panic entry)))
+                (unwrap-panic (as-max-len?
+                    (append acc {
+                        user: (get user leaderboard-entry),
+                        score: (get conservation-score leaderboard-entry),
+                    })
+                    u10
+                ))
+            )
+            acc
+        )
+    )
+)
+
+(define-public (update-leaderboard (user principal))
+    (let (
+            (user-info (unwrap! (map-get? users user) ERR_USER_NOT_FOUND))
+            (conservation-score (get conservation-score user-info))
+        )
+        (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
+
+        (map-set leaderboard (var-get total-users) {
+            user: user,
+            conservation-score: conservation-score,
+        })
+        (ok true)
+    )
+)
+
+(define-read-only (calculate-water-savings (user principal))
+    (let (
+            (user-info (unwrap! (map-get? users user) u0))
+            (total-usage (get total-usage user-info))
+            (daily-limit (get daily-limit user-info))
+            (days-registered (- (get-current-date) (get registered-at user-info)))
+            (potential-usage (* daily-limit days-registered))
+        )
+        (if (> potential-usage total-usage)
+            (- potential-usage total-usage)
+            u0
+        )
+    )
+)
+
+(define-read-only (calculate-goal-progress (user principal))
+    (let (
+            (goal (unwrap! (map-get? user-goals user) u0))
+            (user-info (unwrap! (map-get? users user) u0))
+            (baseline-usage (get baseline-usage goal))
+            (current-total (get total-usage user-info))
+            (days-since-goal (- (get-current-date) (get start-date goal)))
+            (projected-baseline (* baseline-usage days-since-goal))
+        )
+        (if (> projected-baseline u0)
+            (/ (* (- projected-baseline current-total) u100) projected-baseline)
+            u0
+        )
+    )
+)
+
+(define-public (bulk-update-users (users-list (list 50 principal)))
+    (begin
+        (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
+        (fold update-single-user users-list (ok true))
+    )
+)
+
+(define-private (update-single-user
+        (user principal)
+        (prev-response (response bool uint))
+    )
+    (let ((user-info (map-get? users user)))
+        (if (is-some user-info)
+            (let (
+                    (info (unwrap-panic user-info))
+                    (new-score (calculate-conservation-score user))
+                )
+                (map-set users user
+                    (merge info { conservation-score: new-score })
+                )
+                (ok true)
+            )
+            prev-response
+        )
+    )
+)
+
+(define-public (set-conservation-goal
+        (target-reduction-percentage uint)
+        (duration-days uint)
+        (goal-type (string-ascii 20))
+    )
+    (let (
+            (user tx-sender)
+            (current-date (get-current-date))
+            (end-date (+ current-date duration-days))
+            (user-info (unwrap! (map-get? users user) ERR_USER_NOT_FOUND))
+            (days-registered (- current-date (get registered-at user-info)))
+            (daily-avg (if (> days-registered u0)
+                (/ (get total-usage user-info) days-registered)
+                u0
+            ))
+        )
+        (asserts!
+            (and (> target-reduction-percentage u0) (<= target-reduction-percentage u100))
+            ERR_INVALID_AMOUNT
+        )
+        (asserts! (and (> duration-days u0) (<= duration-days u365))
+            ERR_INVALID_GOAL_DURATION
+        )
+        (asserts! (is-none (map-get? user-goals user)) ERR_GOAL_ALREADY_EXISTS)
+
+        (map-set user-goals user {
+            target-reduction-percentage: target-reduction-percentage,
+            start-date: current-date,
+            end-date: end-date,
+            baseline-usage: daily-avg,
+            current-progress: u0,
+            is-achieved: false,
+            goal-type: goal-type,
+        })
+        (ok true)
+    )
+)
+
+(define-public (update-goal-progress)
+    (let (
+            (user tx-sender)
+            (goal (unwrap! (map-get? user-goals user) ERR_GOAL_NOT_FOUND))
+            (current-date (get-current-date))
+            (progress (calculate-goal-progress user))
+            (target-percentage (get target-reduction-percentage goal))
+        )
+        (asserts! (<= current-date (get end-date goal)) ERR_GOAL_EXPIRED)
+
+        (map-set user-goals user (merge goal { current-progress: progress }))
+
+        (if (>= progress target-percentage)
+            (begin
+                (map-set user-goals user (merge goal { is-achieved: true }))
+                (unwrap-panic (award-goal-achievement user progress))
+                (ok true)
+            )
+            (ok false)
+        )
+    )
+)
+
+(define-private (award-goal-achievement
+        (user principal)
+        (actual-reduction uint)
+    )
+    (let (
+            (goal (unwrap! (map-get? user-goals user) ERR_GOAL_NOT_FOUND))
+            (bonus-multiplier (if (> actual-reduction (get target-reduction-percentage goal))
+                u2
+                u1
+            ))
+            (bonus-points (* actual-reduction bonus-multiplier))
+            (user-info (unwrap! (map-get? users user) ERR_USER_NOT_FOUND))
+            (reward-info (unwrap! (map-get? conservation-rewards user) ERR_USER_NOT_FOUND))
+        )
+        (map-set goal-achievements {
+            user: user,
+            goal-id: (get-current-date),
+        } {
+            achieved-at: (get-current-date),
+            actual-reduction: actual-reduction,
+            bonus-points: bonus-points,
+        })
+
+        (map-set conservation-rewards user {
+            total-rewards: (+ (get total-rewards reward-info) bonus-points),
+            last-reward-block: stacks-block-height,
+        })
+        (ok true)
+    )
+)
+
+(define-public (reset-goal)
+    (let (
+            (user tx-sender)
+            (goal (unwrap! (map-get? user-goals user) ERR_GOAL_NOT_FOUND))
+        )
+        (map-delete user-goals user)
+        (ok true)
+    )
+)
+
+(define-public (configure-alerts
+        (warning-threshold-percentage uint)
+        (critical-threshold-percentage uint)
+        (anomaly-detection-enabled bool)
+        (alert-frequency-hours uint)
+    )
+    (let ((user tx-sender))
+        (asserts!
+            (and (> warning-threshold-percentage u0) (<= warning-threshold-percentage u100))
+            ERR_INVALID_THRESHOLD
+        )
+        (asserts!
+            (and (> critical-threshold-percentage u0) (<= critical-threshold-percentage u100))
+            ERR_INVALID_THRESHOLD
+        )
+        (asserts! (>= critical-threshold-percentage warning-threshold-percentage)
+            ERR_INVALID_THRESHOLD
+        )
+        (asserts!
+            (and (> alert-frequency-hours u0) (<= alert-frequency-hours u24))
+            ERR_INVALID_THRESHOLD
+        )
+
+        (map-set user-alert-settings user {
+            warning-threshold-percentage: warning-threshold-percentage,
+            critical-threshold-percentage: critical-threshold-percentage,
+            anomaly-detection-enabled: anomaly-detection-enabled,
+            alert-frequency-hours: alert-frequency-hours,
+            last-alert-timestamp: u0,
+        })
+        (ok true)
+    )
+)
+
+(define-private (check-usage-alerts
+        (user principal)
+        (current-usage uint)
+        (daily-limit uint)
+    )
+    (let (
+            (alert-settings (map-get? user-alert-settings user))
+            (usage-percentage (/ (* current-usage u100) daily-limit))
+        )
+        (if (is-some alert-settings)
+            (let (
+                    (settings (unwrap-panic alert-settings))
+                    (warning-threshold (get warning-threshold-percentage settings))
+                    (critical-threshold (get critical-threshold-percentage settings))
+                    (last-alert-time (get last-alert-timestamp settings))
+                    (alert-frequency (get alert-frequency-hours settings))
+                    (current-time (/
+                        (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1)))
+                        u3600
+                    ))
+                    (time-since-last-alert (- current-time last-alert-time))
+                )
+                (if (and
+                        (>= usage-percentage critical-threshold)
+                        (>= time-since-last-alert alert-frequency)
+                    )
+                    (begin
+                        (unwrap-panic (trigger-alert user "critical" current-usage
+                            critical-threshold
+                        ))
+                        (ok true)
+                    )
+                    (if (and
+                            (>= usage-percentage warning-threshold)
+                            (>= time-since-last-alert alert-frequency)
+                        )
+                        (begin
+                            (unwrap-panic (trigger-alert user "warning" current-usage
+                                warning-threshold
+                            ))
+                            (ok true)
+                        )
+                        (ok false)
+                    )
+                )
+            )
+            (ok false)
+        )
+    )
+)
+
+(define-private (trigger-alert
+        (user principal)
+        (alert-type (string-ascii 20))
+        (usage-amount uint)
+        (threshold-breached uint)
+    )
+    (let (
+            (current-time (/
+                (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1)))
+                u3600
+            ))
+            (alert-id (+ current-time (mod usage-amount u1000)))
+            (settings (unwrap! (map-get? user-alert-settings user) ERR_ALERT_NOT_FOUND))
+        )
+        (map-set alert-history {
+            user: user,
+            alert-id: alert-id,
+        } {
+            alert-type: alert-type,
+            triggered-at: current-time,
+            usage-amount: usage-amount,
+            threshold-breached: threshold-breached,
+            is-acknowledged: false,
+        })
+
+        (map-set user-alert-settings user
+            (merge settings { last-alert-timestamp: current-time })
+        )
+        (ok true)
+    )
+)
+
+(define-public (acknowledge-alert (alert-id uint))
+    (let (
+            (user tx-sender)
+            (alert (unwrap!
+                (map-get? alert-history {
+                    user: user,
+                    alert-id: alert-id,
+                })
+                ERR_ALERT_NOT_FOUND
+            ))
+        )
+        (map-set alert-history {
+            user: user,
+            alert-id: alert-id,
+        }
+            (merge alert { is-acknowledged: true })
+        )
+        (ok true)
+    )
+)
+
+(define-read-only (get-usage-patterns (user principal))
+    (map-get? usage-patterns user)
+)
+
+(define-read-only (get-hourly-usage
+        (user principal)
+        (date uint)
+        (hour uint)
+    )
+    (map-get? hourly-usage-tracking {
+        user: user,
+        date: date,
+        hour: hour,
+    })
+)
+
+(define-read-only (get-personalized-recommendations (user principal))
+    (map-get? personalized-recommendations user)
+)
+
+(define-read-only (get-user-active-alerts (user principal))
+    (let (
+            (current-time (/
+                (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1)))
+                u3600
+            ))
+            (time-window u72)
+        )
+        (fold check-recent-alerts (list u1 u2 u3 u4 u5 u6 u7 u8 u9 u10) (list))
+    )
+)
+
+(define-private (check-recent-alerts
+        (index uint)
+        (acc (list
+            10
+            {
+                alert-id: uint,
+                alert-type: (string-ascii 20),
+                triggered-at: uint,
+                is-acknowledged: bool,
+            }
+        ))
+    )
+    (let (
+            (current-time (/
+                (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1)))
+                u3600
+            ))
+            (alert-key {
+                user: tx-sender,
+                alert-id: (+ current-time index),
+            })
+            (alert (map-get? alert-history alert-key))
+        )
+        (if (is-some alert)
+            (let (
+                    (alert-data (unwrap-panic alert))
+                    (triggered-time (get triggered-at alert-data))
+                )
+                (if (and
+                        (>= (- current-time triggered-time) u0)
+                        (<= (- current-time triggered-time) u72)
+                    )
+                    (unwrap-panic (as-max-len?
+                        (append acc {
+                            alert-id: (+ current-time index),
+                            alert-type: (get alert-type alert-data),
+                            triggered-at: triggered-time,
+                            is-acknowledged: (get is-acknowledged alert-data),
+                        })
+                        u10
+                    ))
+                    acc
+                )
+            )
+            acc
+        )
+    )
+)
+
+(define-read-only (calculate-usage-trend (user principal))
+    (let (
+            (user-info (unwrap! (map-get? users user) u0))
+            (current-date (get-current-date))
+            (yesterday (- current-date u1))
+            (two-days-ago (- current-date u2))
+            (today-usage (get amount
+                (default-to {
+                    amount: u0,
+                    timestamp: u0,
+                }
+                    (map-get? daily-usage {
+                        user: user,
+                        date: current-date,
+                    })
+                )))
+            (yesterday-usage (get amount
+                (default-to {
+                    amount: u0,
+                    timestamp: u0,
+                }
+                    (map-get? daily-usage {
+                        user: user,
+                        date: yesterday,
+                    })
+                )))
+            (two-days-usage (get amount
+                (default-to {
+                    amount: u0,
+                    timestamp: u0,
+                }
+                    (map-get? daily-usage {
+                        user: user,
+                        date: two-days-ago,
+                    })
+                )))
+            (three-day-average (/ (+ today-usage yesterday-usage two-days-usage) u3))
+        )
+        three-day-average
+    )
+)
+
+(define-public (disable-alerts)
+    (let ((user tx-sender))
+        (map-delete user-alert-settings user)
+        (ok true)
+    )
+)
+
+(define-public (record-hourly-usage
+        (amount uint)
+        (hour uint)
+    )
+    (let (
+            (user tx-sender)
+            (current-date (get-current-date))
+            (user-info (unwrap! (map-get? users user) ERR_USER_NOT_FOUND))
+        )
+        (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+        (asserts! (and (>= hour u0) (<= hour u23)) ERR_INVALID_AMOUNT)
+
+        (map-set hourly-usage-tracking {
+            user: user,
+            date: current-date,
+            hour: hour,
+        } {
+            amount: amount,
+            timestamp: stacks-block-height,
+        })
+
+        (unwrap-panic (update-usage-patterns user))
+        (ok true)
+    )
+)
+
+(define-private (update-usage-patterns (user principal))
+    (let (
+            (user-info (unwrap! (map-get? users user) ERR_USER_NOT_FOUND))
+            (current-date (get-current-date))
+            (existing-pattern (default-to {
+                weekday-average: u0,
+                weekend-average: u0,
+                peak-usage-hour: u12,
+                efficiency-score: u50,
+                seasonal-variation: u0,
+                pattern-confidence: u0,
+                last-analysis-date: u0,
+                data-points-count: u0,
+            }
+                (map-get? usage-patterns user)
+            ))
+            (weekday-avg (calculate-weekday-average user))
+            (weekend-avg (calculate-weekend-average user))
+            (peak-hour (find-peak-usage-hour user))
+            (efficiency (calculate-efficiency-score user))
+            (data-points (+ (get data-points-count existing-pattern) u1))
+            (confidence (if (< (/ data-points u2) u100)
+                (/ data-points u2)
+                u100
+            ))
+        )
+        (map-set usage-patterns user {
+            weekday-average: weekday-avg,
+            weekend-average: weekend-avg,
+            peak-usage-hour: peak-hour,
+            efficiency-score: efficiency,
+            seasonal-variation: (calculate-seasonal-variation user),
+            pattern-confidence: confidence,
+            last-analysis-date: current-date,
+            data-points-count: data-points,
+        })
+        (ok true)
+    )
+)
+
+(define-private (calculate-weekday-average (user principal))
+    (let (
+            (current-date (get-current-date))
+            (weekday-sum (fold sum-weekday-usage (list u1 u2 u3 u4 u5) u0))
+        )
+        (/ weekday-sum u5)
+    )
+)
+
+(define-private (sum-weekday-usage
+        (day-offset uint)
+        (acc uint)
+    )
+    (let (
+            (current-date (get-current-date))
+            (check-date (- current-date day-offset))
+            (day-of-week (mod check-date u7))
+        )
+        (if (and (>= day-of-week u1) (<= day-of-week u5))
+            (+ acc (get-daily-usage-amount tx-sender check-date))
+            acc
+        )
+    )
+)
+
+(define-private (calculate-weekend-average (user principal))
+    (let (
+            (current-date (get-current-date))
+            (weekend-sum (fold sum-weekend-usage (list u1 u2 u3 u4 u5 u6 u7) u0))
+        )
+        (/ weekend-sum u2)
+    )
+)
+
+(define-private (sum-weekend-usage
+        (day-offset uint)
+        (acc uint)
+    )
+    (let (
+            (current-date (get-current-date))
+            (check-date (- current-date day-offset))
+            (day-of-week (mod check-date u7))
+        )
+        (if (or (is-eq day-of-week u0) (is-eq day-of-week u6))
+            (+ acc (get-daily-usage-amount tx-sender check-date))
+            acc
+        )
+    )
+)
+
+(define-private (get-daily-usage-amount
+        (user principal)
+        (date uint)
+    )
+    (let ((usage-data (map-get? daily-usage {
+            user: user,
+            date: date,
+        })))
+        (if (is-some usage-data)
+            (get amount (unwrap-panic usage-data))
+            u0
+        )
+    )
+)
+
+(define-private (find-peak-usage-hour (user principal))
+    (let (
+            (current-date (get-current-date))
+            (peak-data (fold find-max-hour
+                (list
+                    u0                     u1                     u2
+                    u3                     u4                     u5
+                    u6                     u7                     u8
+                    u9                     u10                     u11
+                    u12                     u13                     u14
+                    u15                     u16
+                    u17                     u18                     u19
+                    u20
+                    u21                     u22                     u23
+                ) {
+                max-amount: u0,
+                max-hour: u12,
+            }))
+        )
+        (get max-hour peak-data)
+    )
+)
+
+(define-private (find-max-hour
+        (hour uint)
+        (acc {
+            max-amount: uint,
+            max-hour: uint,
+        })
+    )
+    (let (
+            (current-date (get-current-date))
+            (hour-usage (get amount
+                (default-to {
+                    amount: u0,
+                    timestamp: u0,
+                }
+                    (map-get? hourly-usage-tracking {
+                        user: tx-sender,
+                        date: current-date,
+                        hour: hour,
+                    })
+                )))
+        )
+        (if (> hour-usage (get max-amount acc))
+            {
+                max-amount: hour-usage,
+                max-hour: hour,
+            }
+            acc
+        )
+    )
+)
+
+(define-private (calculate-efficiency-score (user principal))
+    (let (
+            (user-info (unwrap! (map-get? users user) u0))
+            (total-usage (get total-usage user-info))
+            (daily-limit (get daily-limit user-info))
+            (days-registered (- (get-current-date) (get registered-at user-info)))
+            (max-possible (* daily-limit days-registered))
+        )
+        (if (> max-possible u0)
+            (/ (* (- max-possible total-usage) u100) max-possible)
+            u50
+        )
+    )
+)
+
+(define-private (calculate-seasonal-variation (user principal))
+    (let (
+            (current-month (mod (/ (get-current-date) u30) u12))
+            (summer-months (list u5 u6 u7 u8))
+            (is-summer (is-some (index-of summer-months current-month)))
+        )
+        (if is-summer
+            u20
+            u10
+        )
+    )
+)
+
+(define-public (generate-recommendations)
+    (let (
+            (user tx-sender)
+            (pattern (unwrap! (map-get? usage-patterns user) ERR_PATTERN_NOT_FOUND))
+            (user-info (unwrap! (map-get? users user) ERR_USER_NOT_FOUND))
+            (efficiency-score (get efficiency-score pattern))
+            (weekday-avg (get weekday-average pattern))
+            (weekend-avg (get weekend-average pattern))
+            (peak-hour (get peak-usage-hour pattern))
+            (confidence (get pattern-confidence pattern))
+        )
+        (asserts! (>= confidence u30) ERR_INSUFFICIENT_DATA)
+
+        (let (
+                (recommendation-type (determine-recommendation-type efficiency-score weekday-avg
+                    weekend-avg peak-hour
+                ))
+                (priority (calculate-priority efficiency-score))
+                (savings (calculate-potential-savings weekday-avg weekend-avg))
+                (difficulty (calculate-implementation-difficulty recommendation-type))
+            )
+            (map-set personalized-recommendations user {
+                recommendation-type: recommendation-type,
+                priority-level: priority,
+                potential-savings: savings,
+                implementation-difficulty: difficulty,
+                generated-at: (get-current-date),
+                is-active: true,
+            })
+            (ok true)
+        )
+    )
+)
+
+(define-private (determine-recommendation-type
+        (efficiency uint)
+        (weekday-avg uint)
+        (weekend-avg uint)
+        (peak-hour uint)
+    )
+    (if (< efficiency u40)
+        "high-efficiency-upgrades"
+        (if (> weekend-avg (* weekday-avg u2))
+            "weekend-conservation"
+            (if (or (is-eq peak-hour u12) (is-eq peak-hour u18))
+                "peak-hour-shifting"
+                "general-optimization"
+            )
+        )
+    )
+)
+
+(define-private (calculate-priority (efficiency uint))
+    (if (< efficiency u30)
+        u3
+        (if (< efficiency u60)
+            u2
+            u1
+        )
+    )
+)
+
+(define-private (calculate-potential-savings
+        (weekday-avg uint)
+        (weekend-avg uint)
+    )
+    (let (
+            (total-weekly (* weekday-avg u5))
+            (weekend-weekly (* weekend-avg u2))
+            (total-avg (/ (+ total-weekly weekend-weekly) u7))
+        )
+        (/ total-avg u10)
+    )
+)
+
+(define-private (calculate-implementation-difficulty (rec-type (string-ascii 30)))
+    (if (is-eq rec-type "high-efficiency-upgrades")
+        u3
+        (if (is-eq rec-type "peak-hour-shifting")
+            u2
+            u1
+        )
+    )
+)
+
+(define-public (dismiss-recommendation)
+    (let (
+            (user tx-sender)
+            (recommendation (unwrap! (map-get? personalized-recommendations user)
+                ERR_PATTERN_NOT_FOUND
+            ))
+        )
+        (map-set personalized-recommendations user
+            (merge recommendation { is-active: false })
+        )
+        (ok true)
+    )
+)
+
+(define-read-only (get-pattern-insights (user principal))
+    (let (
+            (pattern (unwrap! (map-get? usage-patterns user) none))
+            (weekday-avg (get weekday-average pattern))
+            (weekend-avg (get weekend-average pattern))
+            (efficiency (get efficiency-score pattern))
+            (peak-hour (get peak-usage-hour pattern))
+            (confidence (get pattern-confidence pattern))
+        )
+        (some {
+            behavioral-type: (if (> weekend-avg weekday-avg)
+                "weekend-heavy"
+                "consistent"
+            ),
+            usage-efficiency: (if (> efficiency u70)
+                "excellent"
+                (if (> efficiency u40)
+                    "good"
+                    "needs-improvement"
+                )
+            ),
+            peak-period: (if (and (>= peak-hour u6) (<= peak-hour u10))
+                "morning"
+                (if (and (>= peak-hour u17) (<= peak-hour u21))
+                    "evening"
+                    "off-peak"
+                )
+            ),
+            data-reliability: (if (> confidence u70)
+                "high"
+                (if (> confidence u40)
+                    "medium"
+                    "low"
+                )
+            ),
+            conservation-potential: (if (< efficiency u50)
+                "high"
+                "moderate"
+            ),
+        })
+    )
+)
